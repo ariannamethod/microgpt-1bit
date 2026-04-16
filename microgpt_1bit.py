@@ -20,6 +20,7 @@ dataset (ariannamethod/janus.sonar).
 """
 
 import os
+import json
 import math
 import random
 
@@ -441,6 +442,37 @@ class BitGPT:
                   f" 0: {n_zero:4d} ({100*n_zero/total:5.1f}%)  "
                   f"+1: {n_pos:4d} ({100*n_pos/total:5.1f}%)")
 
+    def save_weights(self, path):
+        """Save model weights to a JSON file."""
+        data = {
+            'config': {
+                'n_layer': self.n_layer,
+                'n_embd': self.n_embd,
+                'block_size': self.block_size,
+                'n_head': self.n_head,
+            },
+            'weights': {}
+        }
+        for name, mat in self.weights.items():
+            data['weights'][name] = [[v.data for v in row] for row in mat]
+        os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
+        with open(path, 'w') as f:
+            json.dump(data, f)
+        size_kb = os.path.getsize(path) / 1024
+        print(f"Saved weights to {path} ({size_kb:.1f} KB)")
+
+    def load_weights(self, path):
+        """Load model weights from a JSON file."""
+        with open(path) as f:
+            data = json.load(f)
+        for name, mat_data in data['weights'].items():
+            if name not in self.weights:
+                continue
+            for i, row in enumerate(mat_data):
+                for j, val in enumerate(row):
+                    self.weights[name][i][j].data = val
+        print(f"Loaded weights from {path}")
+
 # ---------------------------------------------------------------------------
 # Standard GPT (baseline for comparison)
 # ---------------------------------------------------------------------------
@@ -672,6 +704,9 @@ def main():
     )
     print(f"num params: {len(bitgpt.parameters())}")
     bit_loss = train(bitgpt, tokenizer, docs, num_steps=num_steps, lr=lr, label="1-bit")
+
+    # Save trained weights
+    bitgpt.save_weights('weights/bitgpt_1bit.json')
 
     # Show weight quantization stats
     bitgpt.weight_stats()
