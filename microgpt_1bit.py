@@ -13,6 +13,10 @@ via the Straight-Through Estimator (STE).
 Training maintains latent full-precision weights updated by Adam. Only the
 forward pass uses quantized weights. Embeddings, RMSNorm, and the output head
 remain in full precision.
+
+Includes SPA (Sentence Phonon Attention) for sentence-level bidirectional
+attention during generation. Trained on the Janus Sonar literary dialogue
+dataset (ariannamethod/janus.sonar).
 """
 
 import os
@@ -103,9 +107,9 @@ class CharTokenizer:
 def load_docs(path='input.txt', url=None, seed=42):
     if not os.path.exists(path):
         import urllib.request
-        url = url or 'https://raw.githubusercontent.com/karpathy/makemore/988aa59/names.txt'
+        url = url or 'https://raw.githubusercontent.com/ariannamethod/janus.sonar/main/dataset.txt'
         urllib.request.urlretrieve(url, path)
-    docs = [line.strip() for line in open(path) if line.strip()]
+    docs = [line.strip() for line in open(path, encoding='utf-8') if line.strip()]
     random.seed(seed)
     random.shuffle(docs)
     return docs
@@ -251,6 +255,64 @@ def swiglu(x, w_gate, w_up):
     up = bitlinear(x, w_up)
     # SiLU(gate) * up
     return [g * sigmoid(g) * u for g, u in zip(gate, up)]
+
+# ---------------------------------------------------------------------------
+# SPA (Sentence Phonon Attention)
+# ---------------------------------------------------------------------------
+# SPA provides sentence-level bidirectional attention between generation steps.
+# Reference: ariannamethod/q (postgpt_q.c)
+
+def spa_embed_sentence(tokens, W_embed, alpha=0.85):
+    """
+    Exponential weighted mean of token embeddings for a sentence.
+    More recent tokens receive higher weight (recency bias).
+    """
+    dim = len(W_embed[0]) if W_embed else 24
+    out = [0.0] * dim
+    total_w = 0.0
+    for i, tok in enumerate(tokens):
+        if tok >= len(W_embed):
+            continue
+        w = alpha ** (len(tokens) - 1 - i)
+        for d in range(dim):
+            emb_val = W_embed[tok][d]
+            out[d] += w * (emb_val.data if hasattr(emb_val, 'data') else emb_val)
+        total_w += w
+    return [x / (total_w + 1e-8) for x in out]
+
+
+def spa_cross_attend(query_emb, sentence_embeddings):
+    """
+    Cross-attend between a query sentence embedding and all previous
+    sentence embeddings. Returns a connectedness score (0 to 1) per
+    previous sentence via scaled dot-product attention.
+    """
+    if not sentence_embeddings:
+        return []
+    dim = len(query_emb)
+    scale = dim ** 0.5
+    scores = []
+    for emb in sentence_embeddings:
+        dot = sum(q * k for q, k in zip(query_emb, emb))
+        scores.append(dot / scale)
+    # softmax over scores
+    max_s = max(scores)
+    exps = [math.exp(s - max_s) for s in scores]
+    total = sum(exps) + 1e-8
+    return [e / total for e in exps]
+
+
+def spa_connectedness(query_emb, sentence_embeddings):
+    """
+    Compute a single scalar connectedness score (0 to 1) representing
+    how strongly the current sentence relates to the conversation history.
+    Uses the max attention weight as the connectedness measure.
+    """
+    if not sentence_embeddings:
+        return 0.5  # neutral when no history
+    weights = spa_cross_attend(query_emb, sentence_embeddings)
+    return max(weights) if weights else 0.5
+
 
 # ---------------------------------------------------------------------------
 # 1-Bit GPT Model (BitNet b1.58)
@@ -522,24 +584,49 @@ def train(model, tokenizer, docs, num_steps=1000, lr=0.01, label="model"):
 # Inference
 # ---------------------------------------------------------------------------
 
-def generate(model, tokenizer, num_samples=20, temperature=0.5, label="model"):
-    print(f"--- {label}: inference (hallucinated names) ---")
+def generate(model, tokenizer, num_samples=10, temperature=0.5, label="model"):
+    """Generate dialogue lines with SPA-modulated logits."""
+    print(f"--- {label}: inference (generated dialogue) ---")
     samples = []
+    sentence_embeddings = []  # SPA: accumulated sentence embeddings
+
+    # Get the embedding table for SPA
+    W_embed = model.weights['wte']
+
     for i in range(num_samples):
         kv_cache = model.new_kv_cache()
         token_id = tokenizer.bos
         chars = []
+        sent_tokens = []  # tokens in current sentence for SPA
+
         for pos_id in range(model.block_size):
             logits = model.forward(token_id, pos_id, kv_cache)
+
+            # SPA: modulate logits using sentence-level attention
+            if sentence_embeddings and sent_tokens:
+                current_emb = spa_embed_sentence(sent_tokens, W_embed)
+                conn = spa_connectedness(current_emb, sentence_embeddings)
+                # Scale logits by connectedness: higher connection = sharper distribution
+                spa_temp = 1.0 - 0.3 * conn  # range [0.7, 1.0]
+                logits = [l * (1.0 / spa_temp) for l in logits]
+
             probs = softmax([l / temperature for l in logits])
             token_id = random.choices(range(tokenizer.vocab_size),
                                       weights=[p.data for p in probs])[0]
             if token_id == tokenizer.bos:
                 break
             chars.append(tokenizer.decode_token(token_id))
-        name = ''.join(chars)
-        samples.append(name)
-        print(f"  sample {i+1:2d}: {name}")
+            sent_tokens.append(token_id)
+
+        line = ''.join(chars)
+        samples.append(line)
+
+        # SPA: embed completed sentence and add to history
+        if sent_tokens:
+            emb = spa_embed_sentence(sent_tokens, W_embed)
+            sentence_embeddings.append(emb)
+
+        print(f"  sample {i+1:2d}: {line}")
     return samples
 
 # ---------------------------------------------------------------------------
@@ -555,12 +642,12 @@ def main():
     tokenizer = CharTokenizer(docs)
     print(f"vocab size: {tokenizer.vocab_size}")
 
-    # Configuration
+    # Configuration — adjusted for Janus Sonar dialogue dataset
     n_layer = 1
     n_embd = 24
     n_head = 4
     block_size = 16
-    num_steps = 1000
+    num_steps = 500
     lr = 0.01
 
     # --- Standard GPT (baseline) ---
@@ -576,8 +663,8 @@ def main():
     random.seed(123)
     baseline_samples = generate(baseline, tokenizer, num_samples=10, label="FP32")
 
-    # --- 1-Bit GPT (BitNet b1.58) ---
-    print("\n========== 1-BIT GPT (BitNet b1.58) ==========")
+    # --- 1-Bit GPT (BitNet b1.58) with SPA ---
+    print("\n========== 1-BIT GPT (BitNet b1.58) + SPA ==========")
     random.seed(42)
     bitgpt = BitGPT(
         vocab_size=tokenizer.vocab_size,
@@ -590,11 +677,24 @@ def main():
     bitgpt.weight_stats()
 
     random.seed(123)
-    bit_samples = generate(bitgpt, tokenizer, num_samples=10, label="1-bit")
+    bit_samples = generate(bitgpt, tokenizer, num_samples=10, label="1-bit+SPA")
+
+    # --- Loss curve ---
+    print("\n========== LOSS CURVE (1-bit) ==========")
+    n_bins = 20
+    bin_size = len(bit_loss) // n_bins
+    for i in range(n_bins):
+        start = i * bin_size
+        end = (i + 1) * bin_size if i < n_bins - 1 else len(bit_loss)
+        chunk = bit_loss[start:end]
+        avg = sum(chunk) / len(chunk)
+        bar = '#' * int(avg * 10)
+        step_label = f"{start + 1}-{end}"
+        print(f"  steps {step_label:>10s} | avg loss {avg:.4f} | {bar}")
 
     # --- Comparison ---
     print("\n========== COMPARISON ==========")
-    print(f"{'Metric':<25s} {'FP32 Baseline':>15s} {'1-Bit BitGPT':>15s}")
+    print(f"{'Metric':<25s} {'FP32 Baseline':>15s} {'1-Bit + SPA':>15s}")
     print("-" * 57)
     print(f"{'Final loss':<25s} {baseline_loss[-1]:>15.4f} {bit_loss[-1]:>15.4f}")
     print(f"{'Min loss':<25s} {min(baseline_loss):>15.4f} {min(bit_loss):>15.4f}")
@@ -604,7 +704,6 @@ def main():
     print(f"{'Num parameters':<25s} {len(baseline.parameters()):>15d} {len(bitgpt.parameters()):>15d}")
 
     # Compute effective bits for BitGPT
-    # Bitlinear layers use 1.58 bits, embeddings/head use 32 bits
     fp_params = 0
     bit_params = 0
     for name, mat in bitgpt.weights.items():
@@ -622,8 +721,9 @@ def main():
     print(f"{'Theoretical memory':<25s} "
           f"{len(baseline.parameters()) * 32 / 8 / 1024:>14.1f}K "
           f"{(fp_params * 32 + bit_params * 2) / 8 / 1024:>14.1f}K")
-    print(f"\nNote: BitNet b1.58 shines at larger scales (3B+ params).")
-    print(f"At this tiny scale ({total} params), quality gap is expected.")
+    print(f"\nDataset: Janus Sonar ({len(docs)} dialogue lines)")
+    print(f"SPA: Sentence Phonon Attention (dim={n_embd})")
+    print(f"Note: BitNet b1.58 shines at larger scales (3B+ params).")
 
 
 if __name__ == '__main__':
