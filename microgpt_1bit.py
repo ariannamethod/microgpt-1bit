@@ -455,7 +455,9 @@ class BitGPT:
         }
         for name, mat in self.weights.items():
             data['weights'][name] = [[v.data for v in row] for row in mat]
-        os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
+        dirpath = os.path.dirname(path)
+        if dirpath:
+            os.makedirs(dirpath, exist_ok=True)
         with open(path, 'w') as f:
             json.dump(data, f)
         size_kb = os.path.getsize(path) / 1024

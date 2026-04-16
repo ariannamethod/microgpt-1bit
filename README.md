@@ -11,7 +11,7 @@ Built on top of [microgpt](https://gist.github.com/karpathy/8627fe009c40f57531cb
 Three things come together:
 
 1. **BitNet b1.58** — all linear layer weights are quantized to {-1, 0, +1}, turning matrix multiplication into pure addition/subtraction
-2. **Janus Sonar dataset** — 2,541 lines of literary dialogue (241K chars) from [ariannamethod/janus.sonar](https://github.com/ariannamethod/janus.sonar), providing rich conversational structure for training
+2. **Janus Sonar dataset** — 2,541 lines of literary dialogue (241K characters) from [ariannamethod/janus.sonar](https://github.com/ariannamethod/janus.sonar), providing rich conversational structure for training
 3. **SPA (Sentence Phonon Attention)** — sentence-level bidirectional attention during generation, inspired by [ariannamethod/q](https://github.com/ariannamethod/q) (postgpt_q.c)
 
 Pre-trained weights are included — clone and run inference immediately without training.
