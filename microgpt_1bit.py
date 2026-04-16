@@ -262,14 +262,12 @@ def swiglu(x, w_gate, w_up):
 # SPA provides sentence-level bidirectional attention between generation steps.
 # Reference: ariannamethod/q (postgpt_q.c)
 
-SPA_DIM = 24  # matches n_embd
-
 def spa_embed_sentence(tokens, W_embed, alpha=0.85):
     """
     Exponential weighted mean of token embeddings for a sentence.
     More recent tokens receive higher weight (recency bias).
     """
-    dim = len(W_embed[0]) if W_embed else SPA_DIM
+    dim = len(W_embed[0]) if W_embed else 24
     out = [0.0] * dim
     total_w = 0.0
     for i, tok in enumerate(tokens):
@@ -649,12 +647,8 @@ def main():
     n_embd = 24
     n_head = 4
     block_size = 16
-    num_steps = 1000
+    num_steps = 500
     lr = 0.01
-
-    # Update SPA_DIM to match embedding dimension
-    global SPA_DIM
-    SPA_DIM = n_embd
 
     # --- Standard GPT (baseline) ---
     print("\n========== STANDARD GPT (FP32 baseline) ==========")
@@ -690,10 +684,12 @@ def main():
     n_bins = 20
     bin_size = len(bit_loss) // n_bins
     for i in range(n_bins):
-        chunk = bit_loss[i * bin_size:(i + 1) * bin_size]
+        start = i * bin_size
+        end = (i + 1) * bin_size if i < n_bins - 1 else len(bit_loss)
+        chunk = bit_loss[start:end]
         avg = sum(chunk) / len(chunk)
         bar = '#' * int(avg * 10)
-        step_label = f"{i * bin_size + 1}-{(i + 1) * bin_size}"
+        step_label = f"{start + 1}-{end}"
         print(f"  steps {step_label:>10s} | avg loss {avg:.4f} | {bar}")
 
     # --- Comparison ---
@@ -726,7 +722,7 @@ def main():
           f"{len(baseline.parameters()) * 32 / 8 / 1024:>14.1f}K "
           f"{(fp_params * 32 + bit_params * 2) / 8 / 1024:>14.1f}K")
     print(f"\nDataset: Janus Sonar ({len(docs)} dialogue lines)")
-    print(f"SPA: Sentence Phonon Attention (dim={SPA_DIM})")
+    print(f"SPA: Sentence Phonon Attention (dim={n_embd})")
     print(f"Note: BitNet b1.58 shines at larger scales (3B+ params).")
 
 
