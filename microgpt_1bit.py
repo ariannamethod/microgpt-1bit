@@ -464,15 +464,54 @@ class BitGPT:
         print(f"Saved weights to {path} ({size_kb:.1f} KB)")
 
     def load_weights(self, path):
-        """Load model weights from a JSON file."""
+        """Load model weights from a JSON file.
+
+        Raises ValueError if the checkpoint config does not match the current
+        model, or if any weight matrix has a different shape. Better to fail
+        loud than load half the weights and silently corrupt inference.
+        """
         with open(path) as f:
             data = json.load(f)
+
+        ckpt_config = data.get('config', {})
+        current_config = {
+            'n_layer': self.n_layer,
+            'n_embd': self.n_embd,
+            'block_size': self.block_size,
+            'n_head': self.n_head,
+        }
+        mismatches = [
+            f"{k}: checkpoint={ckpt_config.get(k)} model={v}"
+            for k, v in current_config.items()
+            if ckpt_config.get(k) != v
+        ]
+        if mismatches:
+            raise ValueError(
+                f"Config mismatch between {path} and current model: "
+                + "; ".join(mismatches)
+            )
+
+        ckpt_keys = set(data['weights'].keys())
+        model_keys = set(self.weights.keys())
+        missing = model_keys - ckpt_keys
+        extra = ckpt_keys - model_keys
+        if missing or extra:
+            raise ValueError(
+                f"Weight key mismatch in {path}: "
+                f"missing={sorted(missing)} extra={sorted(extra)}"
+            )
+
         for name, mat_data in data['weights'].items():
-            if name not in self.weights:
-                continue
+            target = self.weights[name]
+            if len(mat_data) != len(target) or len(mat_data[0]) != len(target[0]):
+                raise ValueError(
+                    f"Shape mismatch for '{name}': "
+                    f"checkpoint={len(mat_data)}x{len(mat_data[0])} "
+                    f"model={len(target)}x{len(target[0])}"
+                )
             for i, row in enumerate(mat_data):
                 for j, val in enumerate(row):
-                    self.weights[name][i][j].data = val
+                    target[i][j].data = val
         print(f"Loaded weights from {path}")
 
 # ---------------------------------------------------------------------------
