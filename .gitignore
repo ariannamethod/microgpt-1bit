@@ -1,0 +1,15 @@
+# Compiled binaries
+train_microgpt_1bit
+train_microgpt_1bit_dbg
+test_bitnet_ops
+infer_microgpt_1bit
+eval_microgpt_1bit
+*.dSYM/
+
+# Transient logs & pids
+*.log
+*.pid
+
+# Checkpoints — keep only final
+weights/*_ckpt.bin
+weights/*_ckpt.meta
